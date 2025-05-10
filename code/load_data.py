@@ -8,6 +8,17 @@ import pickle
 from nilearn.datasets import fetch_haxby
 from nilearn import datasets
 from nilearn.plotting import show
+import os
+
+def load_haxby_data():
+    pkl_file = "datasets.pkl"
+    if os.path.exists(pkl_file):
+        with open(pkl_file, "rb") as f:
+            training_data = pickle.load(f)
+    else:
+        haxby_dataset = datasets.fetch_haxby(subjects=6, fetch_stimuli=True)
+        training_data = create_haxby_datasets(haxby_dataset, pkl_file, n_jobs=-1)  
+    return training_data
 
 def create_haxby_datasets(haxby_dataset, output_file, n_jobs=1):
     """
@@ -63,7 +74,7 @@ def create_haxby_datasets(haxby_dataset, output_file, n_jobs=1):
 
         # Collect data and labels
         patient["X"] = slices
-        patient["y"] = list(zip(y_labels, runs))
+        patient["y"] = [y_labels, runs]
 
         datasets.append(patient)
 

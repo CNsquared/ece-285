@@ -134,14 +134,15 @@ class SimpleResNet(nn.Module):
         x = self.avgpool(x)               # shape: (batch, 512, 1, 1)
         x = torch.flatten(x, 1)           # shape: (batch, 512)
         x = self.fc(x)                    # shape: (batch, num_classes)
-        return x
+        return None, None, x
 
 class simpleCNN(nn.Module):
-    def __init__(self, num_classes=10, input_dim=(1, 32, 32)):
+    def __init__(self, num_classes=8, input_dim=(3, 64, 64)):
         super(simpleCNN, self).__init__()
         self.conv1 = nn.Conv2d(input_dim[0], 16, kernel_size=3, stride=1, padding=1)
         self.conv2 = nn.Conv2d(16, 32, kernel_size=3, stride=1, padding=1)
-        self.fc1 = nn.Linear(32 * input_dim[1] * input_dim[2] // 4, num_classes)
+        # two 2×2 pools reduce each spatial dim by 4 total
+        self.fc1 = nn.Linear(32 * (input_dim[1] // 4) * (input_dim[2] // 4), num_classes)
 
 
     def forward(self, x):
@@ -150,9 +151,9 @@ class simpleCNN(nn.Module):
         x = F.relu(self.conv2(x))
         embedding = F.max_pool2d(x, 2)
         c = embedding.view(embedding.size(0), -1)  # Flatten
-        classification = self.fc1(c)
-        softmax = F.softmax(classification, dim=1)
-        return softmax, embedding
+        logits = self.fc1(c)
+        softmax = F.softmax(logits, dim=1)
+        return softmax, embedding, logits
     
     
     
@@ -166,12 +167,13 @@ class simleGAN(nn.Module):
         pass
     
 class simpleOverallModel(nn.Module):
-    def __init__(self, num_classes=10, input_dim=(1, 32, 32)):
+    def __init__(self, num_classes=9, input_dim=(3, 64, 64)):
         super(simpleOverallModel, self).__init__()
-        self.cnn = SimpleResNet(BasicBlock, [2, 2, 2, 2], num_classes=num_classes)
+        self.cnn = simpleCNN(num_classes=num_classes, input_dim=input_dim)
+        #self.cnn = SimpleResNet(BasicBlock, [2, 2, 2, 2], num_classes=num_classes)
         self.gan = simleGAN()
 
     def forward(self, x):
-        classification, embedding = self.cnn(x)
+        classification, embedding, logits = self.cnn(x)
         x = self.gan(classification, embedding)
         return x
