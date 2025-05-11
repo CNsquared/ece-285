@@ -5,10 +5,12 @@ from skimage.transform import resize
 from joblib import Parallel, delayed
 import pandas as pd
 import pickle
-from nilearn.datasets import fetch_haxby
 from nilearn import datasets
-from nilearn.plotting import show
 import os
+import numpy as np
+from sklearn.model_selection import train_test_split
+import torch
+from torch.utils.data import TensorDataset, DataLoader
 
 def load_haxby_data():
     pkl_file = "datasets.pkl"
@@ -84,6 +86,59 @@ def create_haxby_datasets(haxby_dataset, output_file, n_jobs=1):
 
     print(f"Saved datasets to {output_file}")
     return datasets
+
+
+def create_cnn_datasets(sample_dataset):
+    #Training and creating data for CNN
+    # Convert the sample dataset to tensors and wrap in a DataLoader
+    train_data, train_labels = sample_dataset["X"], sample_dataset["y"]
+    # Extract only the string label from each tuple
+    labels_str = [lbl for lbl, _ in train_labels]
+
+    # Build a mapping from each unique label to an index
+    unique_labels = sorted(set(labels_str))
+    label_to_idx = {lbl: i for i, lbl in enumerate(unique_labels)}
+
+    # One‐hot encode into a list of vectors
+    one_hot_labels = []
+    for lbl in labels_str:
+        vec = [0] * len(unique_labels)
+        vec[label_to_idx[lbl]] = 1
+        one_hot_labels.append(vec)
+        
+    print("Class # to label mapping:")
+    for lbl, idx in sorted(label_to_idx.items(), key=lambda x: x[1]):
+        print(f"Class {idx}: {lbl}")
+
+    # Replace train_labels with the one‐hot encoded vectors
+    train_labels = one_hot_labels
+    
+    # Convert list of arrays to numpy arrays for better performance
+    # Convert to numpy arrays
+    data_arr = np.array(train_data)
+    labels_arr = np.array(train_labels)
+
+    # Split into train and test sets
+    X_train, X_test, y_train, y_test = train_test_split(
+        data_arr, labels_arr, test_size=0.2, shuffle=True, random_state=42
+    )
+
+    # Convert to tensors
+    train_tensor = torch.tensor(X_train, dtype=torch.float32)
+    train_labels_tensor = torch.tensor(y_train, dtype=torch.float32)
+    test_tensor = torch.tensor(X_test, dtype=torch.float32)
+    test_labels_tensor = torch.tensor(y_test, dtype=torch.float32)
+
+    # Create datasets
+    train_dataset = TensorDataset(train_tensor, train_labels_tensor)
+    test_dataset = TensorDataset(test_tensor, test_labels_tensor)
+
+    # Create loaders
+    train_loader = DataLoader(train_dataset, batch_size=32, shuffle=True)
+    test_loader = DataLoader(test_dataset, batch_size=32, shuffle=False)
+    
+    
+    return train_loader, test_loader
 
 if __name__ == "__main__":
     haxby_dataset = datasets.fetch_haxby(subjects=6, fetch_stimuli=True)

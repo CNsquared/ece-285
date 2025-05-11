@@ -139,6 +139,8 @@ class SimpleResNet(nn.Module):
 class simpleCNN(nn.Module):
     def __init__(self, num_classes=8, input_dim=(3, 64, 64)):
         super(simpleCNN, self).__init__()
+        self.num_classes = num_classes
+
         self.conv1 = nn.Conv2d(input_dim[0], 16, kernel_size=3, stride=1, padding=1)
         self.conv2 = nn.Conv2d(16, 32, kernel_size=3, stride=1, padding=1)
         # two 2×2 pools reduce each spatial dim by 4 total
@@ -155,7 +157,55 @@ class simpleCNN(nn.Module):
         softmax = F.softmax(logits, dim=1)
         return softmax, embedding, logits
     
-    
+
+class newCNN(nn.Module):
+    def __init__(self, num_classes=8, input_dim=(3, 64, 64)):
+        super(newCNN, self).__init__()
+        self.num_classes = num_classes
+        # conv blocks with decreasing kernel sizes
+        self.conv1 = nn.Conv2d(input_dim[0], 16, kernel_size=7, stride=1, padding=3, bias=False)
+        self.bn1   = nn.BatchNorm2d(16)
+        self.conv2 = nn.Conv2d(16, 32, kernel_size=5, stride=1, padding=2, bias=False)
+        self.bn2   = nn.BatchNorm2d(32)
+        self.conv3 = nn.Conv2d(32, 64, kernel_size=3, stride=1, padding=1, bias=False)
+        self.bn3   = nn.BatchNorm2d(64)
+        self.conv4 = nn.Conv2d(64, 64, kernel_size=1, stride=1, padding=0, bias=False)
+        self.bn4   = nn.BatchNorm2d(64)
+
+        self.relu  = nn.ReLU(inplace=True)
+        self.pool  = nn.MaxPool2d(2)
+
+        # small residual block at 64 channels
+        self.resblock = BasicBlock(64, 64)
+
+        # global pooling + FC head
+        self.avgpool = nn.AdaptiveAvgPool2d((1, 1))
+        self.fc1     = nn.Linear(64, 128)
+        self.dropout = nn.Dropout(0.5)
+        self.fc2     = nn.Linear(128, num_classes)
+
+    def forward(self, x):
+        # block1
+        x = self.conv1(x); x = self.bn1(x); x = self.relu(x); x = self.pool(x)
+        # block2
+        x = self.conv2(x); x = self.bn2(x); x = self.relu(x); x = self.pool(x)
+        # block3
+        x = self.conv3(x); x = self.bn3(x); x = self.relu(x); x = self.pool(x)
+        # block4
+        x = self.conv4(x); x = self.bn4(x); x = self.relu(x)
+
+        # residual block
+        x = self.resblock(x)
+        embedding = x
+
+        # head
+        x = self.avgpool(x)
+        x = torch.flatten(x, 1)
+        x = self.fc1(x); x = self.relu(x); x = self.dropout(x)
+        logits = self.fc2(x)
+
+        softmax = F.softmax(logits, dim=1)
+        return softmax, embedding, logits
     
 class simleGAN(nn.Module):
     def __init__(self):
@@ -169,9 +219,11 @@ class simleGAN(nn.Module):
 class simpleOverallModel(nn.Module):
     def __init__(self, num_classes=9, input_dim=(3, 64, 64)):
         super(simpleOverallModel, self).__init__()
-        self.cnn = simpleCNN(num_classes=num_classes, input_dim=input_dim)
+        #self.cnn = simpleCNN(num_classes=num_classes, input_dim=input_dim)
+        self.cnn = newCNN(num_classes=num_classes, input_dim=input_dim)
         #self.cnn = SimpleResNet(BasicBlock, [2, 2, 2, 2], num_classes=num_classes)
         self.gan = simleGAN()
+        self.num_classes = num_classes
 
     def forward(self, x):
         classification, embedding, logits = self.cnn(x)
