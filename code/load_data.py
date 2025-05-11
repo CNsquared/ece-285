@@ -12,79 +12,118 @@ from sklearn.model_selection import train_test_split
 import torch
 from torch.utils.data import TensorDataset, DataLoader
 
-def load_haxby_data():
+def load_haxby_data(n_slices=3, pickle_file = True):
     pkl_file = "datasets.pkl"
     if os.path.exists(pkl_file):
+        
         with open(pkl_file, "rb") as f:
             training_data = pickle.load(f)
     else:
         haxby_dataset = datasets.fetch_haxby(subjects=6, fetch_stimuli=True)
-        training_data = create_haxby_datasets(haxby_dataset, pkl_file, n_jobs=-1)  
+        training_data = create_haxby_datasets(haxby_dataset, output_file=pkl_file, n_jobs=-1, n_slices=n_slices, pickle_file=pickle_file)  
     return training_data
+import os
+import pickle
 
-def create_haxby_datasets(haxby_dataset, output_file, n_jobs=1):
+import numpy as np
+import pandas as pd
+import nibabel as nib
+from skimage.transform import resize
+from joblib import Parallel, delayed
+
+
+def split_3d_to_2d(volume_3d: np.ndarray,
+                   n_slices: int = 3,
+                   output_shape: tuple = (64, 64),
+                   axis: str = 'z') -> np.ndarray:
     """
-    Create sagittal/coronal/axial-slice datasets from the Haxby fMRI data and save to a pickle file.
+    Extract `n_slices` equidistant 2D slices from a 3D volume along `axis`,
+    resize each to `output_shape`, and return an array of shape (n_slices, H, W).
+    """
+    axis_map = {'x': 0, 'y': 1, 'z': 2}
+    ax = axis_map[axis.lower()]
+    dim = volume_3d.shape[ax]
+    idxs = np.linspace(0, dim - 1, n_slices, dtype=int)
 
-    Parameters
-    ----------
-    haxby_dataset : Bunch
-        The dataset object returned by nilearn.datasets.fetch_haxby.
-    output_file : str
-        Path to the output pickle file (e.g., 'datasets.pkl').
-    n_jobs : int, default=1
-        Number of parallel jobs for resizing. Use -1 to utilize all CPUs.
+    slices = []
+    for i in idxs:
+        if ax == 0:
+            sl = volume_3d[i, :, :]
+        elif ax == 1:
+            sl = volume_3d[:, i, :]
+        else:
+            sl = volume_3d[:, :, i]
+        sl = resize(
+            sl,
+            output_shape,
+            preserve_range=True,
+            anti_aliasing=True
+        ).astype(volume_3d.dtype)
+        slices.append(sl)
+    return np.stack(slices, axis=0)
 
-    The output file will contain a list of dicts, one per subject, each with keys:
-      - 'X': list of (sagittal, coronal, axial) 64×64 arrays
-      - 'y': list of (label, run) tuples
+
+def create_haxby_datasets(haxby_dataset,
+                          n_slices: int = 3,
+                          output_shape: tuple = (64, 64),
+                          n_jobs: int = 1,
+                          pickle_file: bool = True,
+                          output_file: str = 'haxby_slices.pkl'):
+    """
+    Build per-subject slice datasets from Haxby fMRI.
+
+    Returns
+    -------
+    List[dict], one per subject, each with:
+      - 'X': np.ndarray of shape (n_vols, 3 * n_slices, 64, 64)
+      - 'y': list of length n_vols with the label for each volume
     """
     datasets = []
-    print(f"Creating datasets for {len(haxby_dataset.func)} subjects...")
 
-    # Loop over all subjects
-    for i in range(len(haxby_dataset.func)):
-        print(f"Processing subject {i + 1} of {len(haxby_dataset.func)}")
-        patient = {"X": [], "y": []}
+    for func_file, targ_file in zip(haxby_dataset.func,
+                                    haxby_dataset.session_target):
 
-        # Load labels and run indices
-        labels_df = pd.read_csv(haxby_dataset.session_target[i], sep=" ")
-        y_labels = labels_df["labels"].tolist()
-        runs = labels_df["chunks"].tolist()
+        # Load labels
+        df = pd.read_csv(targ_file, sep=' ')
+        labels = df['labels'].tolist()
+        
 
-        # Load the full 4D image once with memory mapping
-        img4d = nib.load(haxby_dataset.func[i], mmap=True)
-        data4d = img4d.get_fdata()
 
-        # Precompute mid-slice indices
-        x_mid, y_mid, z_mid = [d // 2 for d in img4d.shape[:3]]
+        # Load 4D fMRI
+        img4d = nib.load(func_file)
+        data4d = img4d.get_fdata()        # shape (X, Y, Z, T)
+        n_vols = data4d.shape[-1]
 
-        def process_volume(j):
-            vol = data4d[..., j]
-            sag = resize(vol[x_mid, :, :], (64, 64), preserve_range=True)
-            cor = resize(vol[:, y_mid, :], (64, 64), preserve_range=True)
-            axi = resize(vol[:, :, z_mid], (64, 64), preserve_range=True)
-            return sag, cor, axi
+        # Process one volume: get n_slices per axis, then concatenate
+        def _proc(t):
+            vol3d = data4d[..., t]
+            sag = split_3d_to_2d(vol3d, n_slices, output_shape, axis='x')
+            cor = split_3d_to_2d(vol3d, n_slices, output_shape, axis='y')
+            axi = split_3d_to_2d(vol3d, n_slices, output_shape, axis='z')
+            # concatenate into (3*n_slices, H, W)
+            return np.concatenate([sag, cor, axi], axis=0)
 
-        # Parallel or sequential processing
+        # Run processing
         if n_jobs == 1:
-            slices = [process_volume(j) for j in range(data4d.shape[-1])]
+            subject_slices = [_proc(t) for t in range(n_vols)]
         else:
-            slices = Parallel(n_jobs=n_jobs)(
-                delayed(process_volume)(j) for j in range(data4d.shape[-1])
+            subject_slices = Parallel(n_jobs=n_jobs)(
+                delayed(_proc)(t) for t in range(n_vols)
             )
 
-        # Collect data and labels
-        patient["X"] = slices
-        patient["y"] = [y_labels, runs]
+        # Stack to (n_vols, 3*n_slices, H, W)
+        X = np.stack(subject_slices, axis=0)
+        y = labels
 
-        datasets.append(patient)
+        datasets.append({'X': X, 'y': y})
 
-    # Save to disk
-    with open(output_file, "wb") as f:
-        pickle.dump(datasets, f)
+    # Optionally pickle
+    if pickle_file:
+        os.makedirs(os.path.dirname(output_file) or '.', exist_ok=True)
+        with open(output_file, 'wb') as f:
+            pickle.dump(datasets, f)
+        print(f"Saved {len(datasets)} subject datasets to {output_file}")
 
-    print(f"Saved datasets to {output_file}")
     return datasets
 
 
@@ -93,7 +132,7 @@ def create_cnn_datasets(sample_dataset):
     # Convert the sample dataset to tensors and wrap in a DataLoader
     train_data, train_labels = sample_dataset["X"], sample_dataset["y"]
     # Extract only the string label from each tuple
-    labels_str = [lbl for lbl, _ in train_labels]
+    labels_str = [lbl for lbl in train_labels]
 
     # Build a mapping from each unique label to an index
     unique_labels = sorted(set(labels_str))
@@ -106,9 +145,9 @@ def create_cnn_datasets(sample_dataset):
         vec[label_to_idx[lbl]] = 1
         one_hot_labels.append(vec)
         
-    print("Class # to label mapping:")
-    for lbl, idx in sorted(label_to_idx.items(), key=lambda x: x[1]):
-        print(f"Class {idx}: {lbl}")
+    #print("Class # to label mapping:")
+    #for lbl, idx in sorted(label_to_idx.items(), key=lambda x: x[1]):
+    #    print(f"Class {idx}: {lbl}")
 
     # Replace train_labels with the one‐hot encoded vectors
     train_labels = one_hot_labels

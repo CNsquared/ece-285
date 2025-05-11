@@ -31,8 +31,7 @@ def training_cnn(model, train_loader, num_epochs=10, batch_size=32, learning_rat
 
     for epoch in range(num_epochs):
         
-        
-        
+         
         model.train()
         running_total_loss = 0.0
         running_loss = torch.zeros(num_classes)
@@ -65,7 +64,7 @@ def training_cnn(model, train_loader, num_epochs=10, batch_size=32, learning_rat
             combined_weights = combined_weights / combined_weights.sum() * num_classes
 
             # 4) Use updated weights in the loss
-            criterion = nn.CrossEntropyLoss(weight=combined_weights)
+            criterion = nn.CrossEntropyLoss(label_smoothing=0.1,weight=combined_weights)
             
             
             loss = criterion(logits, labels_idx)
@@ -171,25 +170,22 @@ def eval_cnn(model, test_data):
     }
 
 if __name__ == "__main__":
+    num_slices = 3 # number of slices per axis 
+
     
-    print("Beginning training and testing of the model")
+    print("Loading data...")
+    training_datasets = load_haxby_data(n_slices=num_slices, pickle_file=False)
     
-    training_datasets = load_haxby_data()
-    for i in range(5):
-        
-        sample_dataset = training_datasets[i]
-        
-        model = simpleOverallModel(num_classes=9, input_dim=(3, 64, 64))
-        cnn = model.cnn
-        gan = model.gan
-        
-        
-        train_loader, test_loader = create_cnn_datasets(sample_dataset)
-        
-        training_cnn(cnn, train_loader, num_epochs=10, batch_size=32, learning_rate=1e-3)
-        eval_cnn(cnn, test_loader)
+    t = training_datasets[0]
+    train_data, train_labels = t["X"], t["y"]
+    print(f"shape of training data: {train_data[0].shape}")
+    #print(f"shape of training labels: {train_labels[0].shape}")
        
-     
+    print("Beginning training and testing of the model")
+    model = simpleOverallModel(num_classes=9, input_dim=(num_slices * 3, 64, 64))
+    cnn = model.cnn
+    gan = model.gan
+    
     # collect all sub‐datasets
     train_ds_list = []
     test_ds_list  = []
@@ -216,7 +212,13 @@ if __name__ == "__main__":
         num_workers=4
     )
     
-    training_cnn(cnn, train_loader, num_epochs=10, batch_size=32, learning_rate=1e-3)
+    # inspect a single batch to print the input shapes
+    batch = next(iter(train_loader))
+    inputs, labels = batch
+    print(f"Sample input tensor shape: {inputs.shape}")
+    print(f"Sample label tensor shape: {labels.shape}")
+    
+    training_cnn(cnn, train_loader, num_epochs=10, batch_size=32, learning_rate=1e-4)
     eval_cnn(cnn, test_loader)
         
         
