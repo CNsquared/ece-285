@@ -218,7 +218,7 @@ if __name__ == "__main__":
     print(f"Sample input tensor shape: {inputs.shape}")
     print(f"Sample label tensor shape: {labels.shape}")
     
-    training_cnn(cnn, train_loader, num_epochs=10, batch_size=32, learning_rate=1e-4)
+    training_cnn(cnn, train_loader, num_epochs=10, batch_size=32, learning_rate=1e-3)
     eval_cnn(cnn, test_loader)
         
         

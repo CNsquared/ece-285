@@ -11,6 +11,8 @@ import numpy as np
 from sklearn.model_selection import train_test_split
 import torch
 from torch.utils.data import TensorDataset, DataLoader
+from nilearn.maskers import NiftiMasker
+from nilearn.input_data import NiftiMasker
 
 def load_haxby_data(n_slices=3, pickle_file = True):
     pkl_file = "datasets.pkl"
@@ -30,7 +32,6 @@ import pandas as pd
 import nibabel as nib
 from skimage.transform import resize
 from joblib import Parallel, delayed
-
 
 def split_3d_to_2d(volume_3d: np.ndarray,
                    n_slices: int = 3,
@@ -66,44 +67,85 @@ def split_3d_to_2d(volume_3d: np.ndarray,
 def create_haxby_datasets(haxby_dataset,
                           n_slices: int = 3,
                           output_shape: tuple = (64, 64),
+                          smoothing_fwhm: float = 4,
+                          standardize: str = 'zscore_sample',
                           n_jobs: int = 1,
                           pickle_file: bool = True,
                           output_file: str = 'haxby_slices.pkl'):
     """
-    Build per-subject slice datasets from Haxby fMRI.
+    Build per-subject slice datasets from Haxby fMRI with masking, smoothing, and standardization.
+
+    Parameters
+    ----------
+    haxby_dataset : Bunch
+        The dataset object returned by nilearn.datasets.fetch_haxby.
+    n_slices : int
+        Number of equidistant slices per axis (sagittal, coronal, axial).
+    output_shape : tuple
+        The (height, width) to resize each 2D slice to.
+    smoothing_fwhm : float
+        Full-width at half-maximum for spatial smoothing (in mm).
+    standardize : str
+        Type of standardization ('zscore_sample' recommended).
+    n_jobs : int
+        Number of parallel jobs for slice extraction.
+    pickle_file : bool
+        Whether to pickle the resulting list of datasets.
+    output_file : str
+        Path for the output pickle file.
 
     Returns
     -------
-    List[dict], one per subject, each with:
-      - 'X': np.ndarray of shape (n_vols, 3 * n_slices, 64, 64)
-      - 'y': list of length n_vols with the label for each volume
+    List[dict]
+        One dict per subject with keys:
+          - 'X': np.ndarray of shape (n_vols_non_rest, 3 * n_slices, H, W)
+          - 'y': list of labels (length n_vols_non_rest)
     """
     datasets = []
 
+    # Loop over each subject/session
     for func_file, targ_file in zip(haxby_dataset.func,
                                     haxby_dataset.session_target):
 
-        # Load labels
+        # Load target labels and run indices
         df = pd.read_csv(targ_file, sep=' ')
-        labels = df['labels'].tolist()
-        
+        labels = np.array(df['labels'].tolist())
+        runs = np.array(df['chunks'].tolist())
 
+        # Remove 'rest' condition
+        non_rest_mask = labels != 'rest'
+        labels_no_rest = labels[non_rest_mask]
 
-        # Load 4D fMRI
-        img4d = nib.load(func_file)
-        data4d = img4d.get_fdata()        # shape (X, Y, Z, T)
+        # Initialize the masker and fit on functional 4D image
+        masker = NiftiMasker(
+            mask_img=haxby_dataset.mask,
+            smoothing_fwhm=smoothing_fwhm,
+            standardize=standardize,
+            runs=runs,
+            memory='nilearn_cache',
+            memory_level=1
+        )
+        masker = masker.fit(func_file)
+
+        # Transform to masked 2D (n_vols, n_voxels)
+        masked_full = masker.transform(func_file)
+        # Keep only non-rest volumes
+        masked = masked_full[non_rest_mask]
+
+        # Inverse transform back to 4D brain volumes (X, Y, Z, t_non_rest)
+        masked_img = masker.inverse_transform(masked)
+        data4d = masked_img.get_fdata()  # shape (X, Y, Z, n_vols_non_rest)
         n_vols = data4d.shape[-1]
 
-        # Process one volume: get n_slices per axis, then concatenate
+        # Function to process one timepoint
         def _proc(t):
             vol3d = data4d[..., t]
             sag = split_3d_to_2d(vol3d, n_slices, output_shape, axis='x')
             cor = split_3d_to_2d(vol3d, n_slices, output_shape, axis='y')
             axi = split_3d_to_2d(vol3d, n_slices, output_shape, axis='z')
-            # concatenate into (3*n_slices, H, W)
             return np.concatenate([sag, cor, axi], axis=0)
 
-        # Run processing
+        # Parallelize slice extraction if requested
         if n_jobs == 1:
             subject_slices = [_proc(t) for t in range(n_vols)]
         else:
@@ -111,13 +153,12 @@ def create_haxby_datasets(haxby_dataset,
                 delayed(_proc)(t) for t in range(n_vols)
             )
 
-        # Stack to (n_vols, 3*n_slices, H, W)
         X = np.stack(subject_slices, axis=0)
-        y = labels
+        y = list(labels_no_rest)
 
         datasets.append({'X': X, 'y': y})
 
-    # Optionally pickle
+    # Optionally save to pickle
     if pickle_file:
         os.makedirs(os.path.dirname(output_file) or '.', exist_ok=True)
         with open(output_file, 'wb') as f:
@@ -125,6 +166,7 @@ def create_haxby_datasets(haxby_dataset,
         print(f"Saved {len(datasets)} subject datasets to {output_file}")
 
     return datasets
+
 
 
 def create_cnn_datasets(sample_dataset):
