@@ -104,7 +104,7 @@ def denormalize_batch(x: torch.Tensor) -> torch.Tensor:
 # ───────────────────────────────────────────────────────────────────────────────
 
 from PIL import ImageFile
-ImageFile.LOAD_TRUNCATED_IMAGES = True  # Fix for truncated images
+# ImageFile.LOAD_TRUNCATED_IMAGES = True  # Fix for truncated images
 
 class HaxbyStimuliDataset(Dataset):
     def __init__(self, stimuli_dict, transform=None):
@@ -120,12 +120,19 @@ class HaxbyStimuliDataset(Dataset):
                     + list(stimuli_dict['controls']['scrambled_scissors']) \
                     + list(stimuli_dict['controls']['scrambled_shoes'])
 
-        def img_from_stimulus(stimulus):
+        def img_from_stimulus(stimulus, run):
             if stimulus == "scrambledpix":
-                out =  Image.open(np.random.choice(scrambled_stimuli))
+                out =  Image.open(np.random.choice(scrambled_stimuli)).convert("L")
             else:
                 key = stimulus + "s" if stimulus != "scissors" else stimulus
-                out = Image.open(stimuli_dict[key][0])
+                out = Image.open(stimuli_dict[key][run]).convert("L")  # convert to grayscale
+            old_width, old_height = out.size
+            if old_width != 400 or old_height != 400:
+                new_img = Image.new("L", (400, 400), (0))  # black padding; use (255, 255, 255) for white
+                paste_x = (400 - old_width) // 2
+                paste_y = 0  # already full height
+                new_img.paste(out, (paste_x, paste_y))
+                out = new_img
             return out
 
         print("3) Building sample list for Dataset…")
@@ -149,9 +156,13 @@ class HaxbyStimuliDataset(Dataset):
         )
         X_full = masker.fit_transform(func_filename)
         mask_nonrest = labels_df['labels'].values != 'rest'
+        runs = labels_df['chunks'].values[mask_nonrest]
+        y_nonrest = y[mask_nonrest]
         self.samples = X_full[mask_nonrest]
         self.classes = np.unique(y[mask_nonrest]).tolist()
-        self.stimuli = [img_from_stimulus(i) for i in labels_df['labels'].values[mask_nonrest]]
+        self.stimuli = [img_from_stimulus(y_nonrest[i], runs[i]) for i in range(len(runs))]
+        self.labels = y_nonrest
+        self.runs = runs
 
     def __len__(self):
         return len(self.samples)
@@ -183,15 +194,50 @@ transform = transforms.Compose([
 ])
 
 haxby_dataset = HaxbyStimuliDataset(stimuli_dict, transform=transform)
-dataloader     = DataLoader(
-    haxby_dataset,
-    batch_size=BATCH_SIZE,
-    shuffle=True,
-    num_workers=NUM_WORKERS,
-    pin_memory=(DEVICE.type == "cuda")
-)
+# dataloader     = DataLoader(
+#     haxby_dataset,
+#     batch_size=BATCH_SIZE,
+#     shuffle=True,
+#     num_workers=NUM_WORKERS,
+#     pin_memory=(DEVICE.type == "cuda")
+# )
+
+# val_length = BATCH_SIZE
+# train_length = len(haxby_dataset) - val_length
+# train_dataset, val_dataset = torch.utils.data.random_split(
+#     haxby_dataset, [train_length, val_length],
+#     generator=torch.Generator().manual_seed(MANUAL_SEED)
+# )
+# train_dataloader = DataLoader(
+#     train_dataset,
+#     batch_size=BATCH_SIZE,
+#     shuffle=True,
+#     num_workers=NUM_WORKERS,
+#     pin_memory=(DEVICE.type == "cuda")
+# )
+
+# val_dataloader = DataLoader(
+#     val_dataset,
+#     batch_size=BATCH_SIZE,
+#     shuffle=False,
+#     num_workers=NUM_WORKERS,
+#     pin_memory=(DEVICE.type == "cuda")
+# )
+
+non_cat_indices = [i for i, lbl in enumerate(haxby_dataset.labels) if lbl != "cat" or (lbl == "cat" and haxby_dataset.runs[i] <= 10)]
+cat_indices = [i for i, lbl in enumerate(haxby_dataset.labels) if lbl == "cat" and haxby_dataset.runs[i] == 11]
+# expand cat_indices to length BATCH_SIZE by repeating the indices
+cat_indices = cat_indices + np.random.choice(cat_indices, size=BATCH_SIZE - len(cat_indices), replace=True).tolist()
+
+cat_dataset = torch.utils.data.Subset(haxby_dataset, cat_indices)
+non_cat_dataset = torch.utils.data.Subset(haxby_dataset, non_cat_indices)
+
+cat_dataloader = DataLoader(cat_dataset, batch_size=BATCH_SIZE, shuffle=True)
+non_cat_dataloader = DataLoader(non_cat_dataset, batch_size=BATCH_SIZE, shuffle=True)
 
 print(f"    Dataset size       = {len(haxby_dataset)} images")
+print(f"    Train size         = {len(non_cat_dataset)} images")
+print(f"    Validation size    = {len(cat_dataset)} images")
 print(f"    Number of classes  = {len(haxby_dataset.classes)}\n")
 
 # Dynamically set CLASS_DIM = number of classes
@@ -449,8 +495,8 @@ def train_conditional_dcgan(
 
     # LSGAN criterion
     criterion  = nn.MSELoss()
-    optimizerD = optim.Adam(netD.parameters(), lr=lr_d, betas=(beta1, 0.999))
-    optimizerG = optim.Adam(netG.parameters(), lr=lr_g, betas=(beta1, 0.999))
+    optimizerD = optim.Adam(netD.parameters(), lr=lr_d, betas=(beta1, 0.999), weight_decay=0.1)
+    optimizerG = optim.Adam(netG.parameters(), lr=lr_g, betas=(beta1, 0.999), weight_decay=0.1)
 
     real_label_val = REAL_LABEL_SMOOTH
     fake_label_val = FAKE_LABEL_VAL
@@ -461,21 +507,6 @@ def train_conditional_dcgan(
 
     # Prepare fixed noise + class indices for sample visualization (64 total)
     fixed_noise = torch.randn(64, nz, device=device)
-    images, brain_scans = next(iter(dataloader))
-    b_size = images.size(0)
-    all_indices = np.arange(b_size)
-    np.random.shuffle(all_indices)
-    fixed_sample_choices = all_indices[:64]
-
-    with torch.no_grad():
-        fixed_latent_spaces = []
-        for i in fixed_sample_choices:
-            # brain_scans[i] has shape [39912]; add a batch dimension → [1, 39912]
-            x = brain_scans[i].unsqueeze(0).to(device)
-            mu, _ = latent_clf.encode(x)
-            fixed_latent_spaces.append(mu.detach())
-
-    fixed_latent_spaces = torch.cat(fixed_latent_spaces, dim=0)  # shape [64, latent_dim]
 
     print("   Fixed noise & class indices built for sampling.\n")
 
@@ -500,6 +531,8 @@ def train_conditional_dcgan(
             with torch.no_grad():
                 mu, _ = latent_clf.encode(brain_scans)  # (batch, latent_dim)
                 latent_space = mu  # (batch, latent_dim)
+                # add small Gaussian noise to latent space for stability
+                latent_space += torch.randn_like(latent_space) * 0.01
 
             # (a) Real pass
             with autocast(enabled=use_amp):
@@ -540,8 +573,14 @@ def train_conditional_dcgan(
         # ────────────── Save sample grid every N epochs ──────────────
         if epoch % sample_interval_epochs == 0 or epoch == 1:
             print(f"   → Saving fake sample grid at epoch {epoch}…")
+            netG.eval()  # Set G to eval mode for inference
             with torch.no_grad():
-                fake_samples = netG(fixed_noise, fixed_latent_spaces).detach().cpu()
+                for _, brain_scans in cat_dataloader:
+                    # Convert brain scans to latent space
+                    mu, _ = latent_clf.encode(brain_scans.to(device))
+                    latent_space = mu
+                    fake_samples = netG(fixed_noise, latent_space)  # (64, 3, 64, 64)
+            netG.train()  # Set G back to train mode
             fake_grid = vutils.make_grid(
                 denormalize_batch(fake_samples),
                 padding=2, normalize=False, nrow=8
@@ -568,7 +607,7 @@ def train_conditional_dcgan(
 if __name__ == "__main__":
     print("9) Launching training…\n")
     train_conditional_dcgan(
-        dataloader=dataloader,
+        dataloader=non_cat_dataloader,
         nz=NZ,
         embed_dim=EMBED_DIM,
         ngf=NGF,
