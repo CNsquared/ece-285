@@ -62,7 +62,7 @@ NGF          = 256     # base number of feature maps in G
 NDF          = 256     # base number of feature maps in D
 
 # Learning rates & optimizer params
-LR_D         = 5e-5
+LR_D         = 1e-5
 LR_G         = 1e-4
 BETA1        = 0.5
 
@@ -495,8 +495,8 @@ def train_conditional_dcgan(
 
     # LSGAN criterion
     criterion  = nn.MSELoss()
-    optimizerD = optim.Adam(netD.parameters(), lr=lr_d, betas=(beta1, 0.999), weight_decay=0.1)
-    optimizerG = optim.Adam(netG.parameters(), lr=lr_g, betas=(beta1, 0.999), weight_decay=0.1)
+    optimizerD = optim.Adam(netD.parameters(), lr=lr_d, betas=(beta1, 0.999))
+    optimizerG = optim.Adam(netG.parameters(), lr=lr_g, betas=(beta1, 0.999))
 
     real_label_val = REAL_LABEL_SMOOTH
     fake_label_val = FAKE_LABEL_VAL
@@ -532,7 +532,7 @@ def train_conditional_dcgan(
                 mu, _ = latent_clf.encode(brain_scans)  # (batch, latent_dim)
                 latent_space = mu  # (batch, latent_dim)
                 # add small Gaussian noise to latent space for stability
-                latent_space += torch.randn_like(latent_space) * 0.01
+                latent_space += torch.randn_like(latent_space) * 0.001
 
             # (a) Real pass
             with autocast(enabled=use_amp):
